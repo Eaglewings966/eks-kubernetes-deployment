@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: devops-demo-app
+  namespace: devops-demo
+  labels:
+    app: devops-demo-app
+    managed-by: emmanuel-ubani
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: devops-demo-app
+  template:
+    metadata:
+      labels:
+        app: devops-demo-app
+    spec:
+      containers:
+        - name: devops-demo-app
+          image: eaglewings6/devops-demo-app:latest
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5

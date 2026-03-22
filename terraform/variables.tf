@@ -39,3 +39,13 @@ variable "max_nodes" {
   type        = number
   default     = 3
 }
+variable "capacity_type" {
+  description = "Capacity type for EKS node group — SPOT or ON_DEMAND"
+  type        = string
+  default     = "SPOT"
+}
+variable "node_ami_id" {
+  description = "EKS optimized AMI ID for worker nodes"
+  type        = string
+  default     = "ami-0a23644f1ead7eb05"
+}

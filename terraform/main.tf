@@ -2,25 +2,22 @@ provider "aws" {
   region = var.aws_region
 }
 
-# --- Data Sources ---
 data "aws_availability_zones" "available" {
   state = "available"
 }
 
-# --- VPC ---
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = true
   enable_dns_hostnames = true
 
   tags = {
-    Name                                            = "${var.project_name}-vpc"
-    "kubernetes.io/cluster/${var.project_name}"     = "shared"
-    ManagedBy                                       = "terraform"
+    Name                                        = "${var.project_name}-vpc"
+    "kubernetes.io/cluster/${var.project_name}" = "shared"
+    ManagedBy                                   = "terraform"
   }
 }
 
-# --- Internet Gateway ---
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 
@@ -30,7 +27,6 @@ resource "aws_internet_gateway" "main" {
   }
 }
 
-# --- Public Subnets ---
 resource "aws_subnet" "public_a" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
@@ -38,10 +34,10 @@ resource "aws_subnet" "public_a" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name                                            = "${var.project_name}-public-a"
-    "kubernetes.io/cluster/${var.project_name}"     = "shared"
-    "kubernetes.io/role/elb"                        = "1"
-    ManagedBy                                       = "terraform"
+    Name                                        = "${var.project_name}-public-a"
+    "kubernetes.io/cluster/${var.project_name}" = "shared"
+    "kubernetes.io/role/elb"                    = "1"
+    ManagedBy                                   = "terraform"
   }
 }
 
@@ -52,14 +48,13 @@ resource "aws_subnet" "public_b" {
   map_public_ip_on_launch = true
 
   tags = {
-    Name                                            = "${var.project_name}-public-b"
-    "kubernetes.io/cluster/${var.project_name}"     = "shared"
-    "kubernetes.io/role/elb"                        = "1"
-    ManagedBy                                       = "terraform"
+    Name                                        = "${var.project_name}-public-b"
+    "kubernetes.io/cluster/${var.project_name}" = "shared"
+    "kubernetes.io/role/elb"                    = "1"
+    ManagedBy                                   = "terraform"
   }
 }
 
-# --- Route Table ---
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
 
@@ -84,7 +79,6 @@ resource "aws_route_table_association" "public_b" {
   route_table_id = aws_route_table.public.id
 }
 
-# --- IAM Role for EKS Cluster ---
 resource "aws_iam_role" "eks_cluster" {
   name = "${var.project_name}-cluster-role"
 
@@ -109,7 +103,6 @@ resource "aws_iam_role_policy_attachment" "eks_cluster_policy" {
   role       = aws_iam_role.eks_cluster.name
 }
 
-# --- IAM Role for EKS Node Group ---
 resource "aws_iam_role" "eks_nodes" {
   name = "${var.project_name}-node-role"
 
@@ -144,7 +137,55 @@ resource "aws_iam_role_policy_attachment" "eks_container_registry" {
   role       = aws_iam_role.eks_nodes.name
 }
 
-# --- EKS Cluster ---
+resource "aws_iam_instance_profile" "eks_nodes" {
+  name = "${var.project_name}-node-profile"
+  role = aws_iam_role.eks_nodes.name
+
+  tags = {
+    ManagedBy = "terraform"
+  }
+}
+
+resource "aws_security_group" "eks_nodes" {
+  name        = "${var.project_name}-node-sg"
+  description = "Security group for EKS self-managed nodes"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    self      = true
+  }
+
+  ingress {
+    from_port       = 1025
+    to_port         = 65535
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.main.vpc_config[0].cluster_security_group_id]
+  }
+
+  ingress {
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_eks_cluster.main.vpc_config[0].cluster_security_group_id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name                                        = "${var.project_name}-node-sg"
+    "kubernetes.io/cluster/${var.project_name}" = "owned"
+    ManagedBy                                   = "terraform"
+  }
+}
+
 resource "aws_eks_cluster" "main" {
   name     = var.project_name
   role_arn = aws_iam_role.eks_cluster.arn
@@ -168,37 +209,76 @@ resource "aws_eks_cluster" "main" {
   }
 }
 
-# --- EKS Node Group ---
-resource "aws_eks_node_group" "main" {
-  cluster_name    = aws_eks_cluster.main.name
-  node_group_name = "${var.project_name}-nodes"
-  node_role_arn   = aws_iam_role.eks_nodes.arn
+resource "aws_launch_template" "eks_nodes" {
+  name_prefix   = "${var.project_name}-node-"
+  image_id      = var.node_ami_id
+  instance_type = var.node_instance_type
 
-  subnet_ids = [
-    aws_subnet.public_a.id,
-    aws_subnet.public_b.id
-  ]
-
-  instance_types = [var.node_instance_type]
-
-  scaling_config {
-    desired_size = var.desired_nodes
-    min_size     = var.min_nodes
-    max_size     = var.max_nodes
+  iam_instance_profile {
+    name = aws_iam_instance_profile.eks_nodes.name
   }
 
-  update_config {
-    max_unavailable = 1
+  vpc_security_group_ids = [aws_security_group.eks_nodes.id]
+
+  user_data = base64encode(<<-EOF
+    #!/bin/bash
+    set -o xtrace
+    /etc/eks/bootstrap.sh ${var.project_name}
+  EOF
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = {
+      Name                                        = "${var.project_name}-node"
+      "kubernetes.io/cluster/${var.project_name}" = "owned"
+      ManagedBy                                   = "terraform"
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    ManagedBy = "terraform"
+  }
+}
+
+resource "aws_autoscaling_group" "eks_nodes" {
+  name                = "${var.project_name}-nodes-asg"
+  desired_capacity    = var.desired_nodes
+  min_size            = var.min_nodes
+  max_size            = var.max_nodes
+  vpc_zone_identifier = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+
+  launch_template {
+    id      = aws_launch_template.eks_nodes.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${var.project_name}-node"
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "kubernetes.io/cluster/${var.project_name}"
+    value               = "owned"
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "ManagedBy"
+    value               = "terraform"
+    propagate_at_launch = true
   }
 
   depends_on = [
+    aws_eks_cluster.main,
     aws_iam_role_policy_attachment.eks_worker_node_policy,
     aws_iam_role_policy_attachment.eks_cni_policy,
     aws_iam_role_policy_attachment.eks_container_registry
   ]
-
-  tags = {
-    Name      = "${var.project_name}-nodes"
-    ManagedBy = "terraform"
-  }
 }
